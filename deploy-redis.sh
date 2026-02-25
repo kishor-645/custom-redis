@@ -22,8 +22,7 @@ EXPECTED_PODS="${EXPECTED_PODS:-$REDIS_REPLICAS}"
 REDIS_PORT="${REDIS_PORT:-6379}"
 HAPROXY_REPLICAS="${HAPROXY_REPLICAS:-1}"
 HAPROXY_SERVICE_TYPE="${HAPROXY_SERVICE_TYPE:-LoadBalancer}"
-HAPROXY_SERVICE_LB_IP="${HAPROXY_SERVICE_LB_IP:-}"
-REDIS_INGRESS_HOST="mylocal.com"
+REDIS_PASSWORD="ZH6LyKt5aC4r"
 
 REDIS_IMAGE_REPOSITORY="${REDIS_IMAGE_REPOSITORY:-public.ecr.aws/docker/library/redis}"
 REDIS_IMAGE_TAG="${REDIS_IMAGE_TAG:-8.2.4-alpine}"
@@ -33,7 +32,8 @@ EXPORTER_TAG="${EXPORTER_TAG:-v1.80.2}"
 # === Redis-HA Helm Install Command from Local Chart ===
 HELM_ARGS=(
   --set replicas="$REDIS_REPLICAS"
-  --set auth=false
+  --set auth=true
+  --set-string redisPassword="$REDIS_PASSWORD"
   --set sentinel.auth=false
   --set exporter.enabled=true
   --set haproxy.enabled=true
@@ -59,13 +59,6 @@ HELM_ARGS=(
   --set tolerations[1].effect=NoSchedule
 )
 
-if [ -n "$HAPROXY_SERVICE_LB_IP" ]; then
-  HELM_ARGS+=(--set "haproxy.service.loadBalancerIP=$HAPROXY_SERVICE_LB_IP")
-fi
-
-if [ -n "$REDIS_INGRESS_HOST" ]; then
-  HELM_ARGS+=(--set-string "haproxy.service.annotations.external-dns\\.alpha\\.kubernetes\\.io/hostname=$REDIS_INGRESS_HOST")
-fi
 
 helm upgrade --install "$REDIS_RELEASE_NAME" "$CHART_PATH" \
   -n "$NAMESPACE" --create-namespace \
@@ -80,7 +73,7 @@ helm upgrade --install "$REDIS_RELEASE_NAME" "$CHART_PATH" \
 # === Wait for Redis-HA Pods to be Fully Ready (All Containers) ===
 echo "⏳ Waiting for all Redis-HA pods to be fully 'Ready (all containers)'..."
 
-TIMEOUT=300
+TIMEOUT=500
 INTERVAL=10
 ELAPSED=0
 
@@ -115,9 +108,14 @@ while true; do
 done
 
 # === Discover Central Endpoint (HAProxy LoadBalancer) ===
-HAPROXY_SERVICE_NAME=$(kubectl get svc -n "$NAMESPACE" -l "release=$REDIS_RELEASE_NAME,app=redis-ha-haproxy" -o jsonpath='{.items[0].metadata.name}')
+HAPROXY_SERVICE_NAME="${REDIS_RELEASE_NAME}-haproxy"
+if ! kubectl get svc "$HAPROXY_SERVICE_NAME" -n "$NAMESPACE" >/dev/null 2>&1; then
+  HAPROXY_SERVICE_NAME=$(kubectl get svc -n "$NAMESPACE" -l "release=$REDIS_RELEASE_NAME" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | grep -E -- '-haproxy$' | head -n1)
+fi
 if [ -z "$HAPROXY_SERVICE_NAME" ]; then
-  HAPROXY_SERVICE_NAME="${REDIS_RELEASE_NAME}-haproxy"
+  echo "❌ Could not find HAProxy service for release $REDIS_RELEASE_NAME in namespace $NAMESPACE"
+  kubectl get svc -n "$NAMESPACE" || true
+  exit 1
 fi
 
 echo "⏳ Waiting for HAProxy LoadBalancer endpoint..."
@@ -155,8 +153,6 @@ echo "✅ Central Redis endpoint is ready:"
 echo "Service: $HAPROXY_SERVICE_NAME"
 echo "LB IP: ${LB_IP:-pending}"
 echo "LB Hostname: ${LB_HOSTNAME:-pending}"
-echo "Connect: redis://$REDIS_ENDPOINT:$REDIS_PORT"
-
-if [ -n "$REDIS_INGRESS_HOST" ]; then
-  echo "Ingress URL (DNS): redis://$REDIS_INGRESS_HOST:$REDIS_PORT"
-fi
+echo "Password: $REDIS_PASSWORD"
+echo "Connect URI: redis://:$REDIS_PASSWORD@$REDIS_ENDPOINT:$REDIS_PORT"
+echo "redis-cli example: redis-cli -h $REDIS_ENDPOINT -p $REDIS_PORT -a '$REDIS_PASSWORD'"
